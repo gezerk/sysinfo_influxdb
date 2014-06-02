@@ -15,6 +15,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+        "os/exec"
+        "log"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +39,7 @@ var hostFlag string
 var usernameFlag string
 var passwordFlag string
 var databaseFlag string
+var gcpidFlag string 
 
 func init() {
 	flag.BoolVar(&versionFlag, "version", false, "Print the version number and exit.")
@@ -61,6 +64,8 @@ func init() {
 	flag.StringVar(&collectFlag, "collect", "cpus,mem,swap,uptime,load,network,disks", "Chose which data to collect.")
 	flag.StringVar(&collectFlag, "c", "cpus,mem,swap,uptime,load,network,disks", "Chose which data to collect (shorthand).")
 
+        flag.StringVar(&gcpidFlag, "pid", "", "Process id for garbage collection metrics.")
+
 	flag.BoolVar(&daemonFlag, "daemon", false, "Run in daemon mode.")
 	flag.BoolVar(&daemonFlag, "D", false, "Run in daemon mode (shorthand).")
 	flag.DurationVar(&daemonIntervalFlag, "interval", time.Second, "With daemon mode, change time between checks.")
@@ -73,6 +78,10 @@ func main() {
 	if versionFlag {
 		fmt.Println("Version:", APP_VERSION)
 	} else {
+                // Error if garbage collection selected and not pid provided
+                if strings.Contains(collectFlag, "gc") && gcpidFlag =="" {
+                        log.Fatal("You must provide a pid if you choose the garbage collection option")
+                }
 		// Fill InfluxDB connection settings
 		var client *influxClient.Client = nil;
 		if databaseFlag != "" {
@@ -109,6 +118,8 @@ func main() {
 				collectList = append(collectList, network)
 			case "disks":
 				collectList = append(collectList, disks)
+                        case "gc":
+                                collectList = append(collectList, gc)
 			default:
 				fmt.Fprintf(os.Stderr, "Unknown collect option `%s'\n", c)
 				return
@@ -461,4 +472,43 @@ func disks(prefix string, ch chan *influxClient.Series) error {
 
 	ch <- DiffFromLast(serie)
 	return nil
+}
+
+func gc(prefix string, ch chan *influxClient.Series) error {
+        out, err := exec.Command("jstat", "-gc", gcpidFlag).Output()
+        if err != nil {
+        	    ch <- nil
+                return err
+        }
+        
+        serie := &influxClient.Series{
+			Name:    prefix + "gc",
+			Columns: []string{"surviv_0_cap","surviv_1_cap",
+			               "surviv_0_util", "surviv_1_util",
+			               "eden_cap", "eden_util",
+			               "old_cap", "old_util",
+			               "perm_cap", "perm_util",
+			               "young_gc_count", "young_gc_time",
+			               "full_gc_count", "full_gc_time",
+			               "total_gc_time"},
+			Points:  [][]interface{}{},
+		}
+
+                s := string(out[:])
+		lines := strings.Split(s, "\n")
+		vals := strings.Fields(lines[1])
+                var points []interface{}
+		for _, val := range vals {
+			if v, err := strconv.Atoi(strings.Split(val, ".")[0]); err == nil{
+				points = append(points, v)
+			} else {
+				points = append(points, 0)
+			}
+			
+		}
+
+                serie.Points = append(serie.Points, points)
+
+		ch <- serie
+        return nil
 }
